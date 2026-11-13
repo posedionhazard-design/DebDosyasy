@@ -167,7 +167,7 @@ jobs:
 
       - name: Xcode ile derle
         run: |
-          set -o pipefail
+          set +e
           xcodebuild build \
             -project "$XCODEPROJ" \
             -scheme "$SCHEME" \
@@ -178,9 +178,17 @@ jobs:
             ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             IPHONEOS_DEPLOYMENT_TARGET=14.0 \
-            | tail -n 200
+            GCC_PREPROCESSOR_DEFINITIONS='$(inherited) __forceinline=inline' \
+            > build.log 2>&1
+          RC=$?
+          echo "xcodebuild cikis kodu: $RC"
+          echo "================ HATA OZETI ================"
+          grep -E "error:" build.log | sed -E 's#/Users/runner/work/[^/]+/[^/]+/##' | sort -u | head -40
+          echo "================ SON 30 SATIR ================"
+          tail -n 30 build.log
           echo "---- Uretilen dosyalar ----"
-          find build/Build/Products -maxdepth 3 | head -50
+          find build/Build/Products -maxdepth 3 2>/dev/null | head -50
+          exit $RC
 
       - name: .deb olustur
         run: |
