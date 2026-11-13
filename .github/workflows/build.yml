@@ -106,11 +106,11 @@ jobs:
                   for n, full in index:
                       if n.lower() == lname:
                           strong.append(full)
-                  if "_" in name:
+                  if not strong and "_" in name:
                       suf = name.split("_", 1)[1].lower()
-                      for n, full in index:
-                          if n.lower().endswith(suf) and full not in strong:
-                              strong.append(full)
+                      tier1 = [full for n, full in index if "_" in n and n.split("_", 1)[1].lower() == suf]
+                      tier2 = [full for n, full in index if n.lower().endswith(suf)]
+                      strong = tier1 or tier2
 
                   fuzzy = []
                   ext = os.path.splitext(name)[1].lower()
@@ -127,12 +127,24 @@ jobs:
                       print("   aday yok: dosya zip icinde bulunamadi")
 
                   pick = None
+                  if len(strong) > 1:
+                      exp_dir = os.path.basename(os.path.dirname(path)).lower()
+                      same_dir = [c for c in strong if os.path.basename(os.path.dirname(c)).lower() == exp_dir]
+                      if len(same_dir) >= 1:
+                          strong = same_dir
+                  if len(strong) > 1:
+                      import hashlib
+                      hs = set(hashlib.md5(open(c, "rb").read()).hexdigest() for c in strong)
+                      if len(hs) == 1:
+                          strong = strong[:1]
                   if len(strong) == 1:
                       pick = strong[0]
                   elif not strong and len(fuzzy) == 1:
                       r = difflib.SequenceMatcher(None, name, nfc(os.path.basename(fuzzy[0]))).ratio()
                       if r >= 0.85:
                           pick = fuzzy[0]
+                  elif len(strong) > 1:
+                      print("   BELIRSIZ: birden fazla aday var, otomatik secilmedi")
                   if pick:
                       os.makedirs(os.path.dirname(path), exist_ok=True)
                       shutil.copy2(pick, path)
@@ -145,6 +157,7 @@ jobs:
           except Exception as e:
               print("Tarama hatasi (devam ediliyor):", repr(e))
           PY
+          echo "## Eksik dosya taramasi" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Eksik imgui Metal dosyalarini tamamla
         run: |
@@ -184,6 +197,12 @@ jobs:
           echo "xcodebuild cikis kodu: $RC"
           echo "================ HATA OZETI ================"
           grep -E "error:" build.log | sed -E 's#/Users/runner/work/[^/]+/[^/]+/##' | sort -u | head -40
+          {
+            echo "## Derleme hatalari"
+            echo '```'
+            grep -E "error:" build.log | sed -E 's#/Users/runner/work/[^/]+/[^/]+/##' | sort -u | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "================ SON 30 SATIR ================"
           tail -n 30 build.log
           echo "---- Uretilen dosyalar ----"
