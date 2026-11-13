@@ -19,48 +19,70 @@ jobs:
           rm -rf src/__MACOSX
           find src -maxdepth 3 -not -path '*/.git/*' | head -60
 
-      - name: Bagimliliklari kur
+      - name: Araclari kur
         run: |
-          brew install ldid dpkg make xz fakeroot || true
+          brew install ldid dpkg || true
 
-      - name: Theos kur
+      - name: Xcode projesini bul
         run: |
-          git clone --recursive --depth=1 https://github.com/theos/theos.git $HOME/theos
-          rm -rf $HOME/theos/sdks
-          git clone --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          ls $HOME/theos/sdks
+          XP=$(find src -maxdepth 5 -name '*.xcodeproj' | head -1)
+          if [ -z "$XP" ]; then echo "HATA: .xcodeproj bulunamadi"; exit 1; fi
+          echo "Proje: $XP"
+          echo "XCODEPROJ=$XP" >> $GITHUB_ENV
+          xcodebuild -list -project "$XP" || true
+          SCHEME=$(xcodebuild -list -json -project "$XP" | python3 -c "import sys,json; d=json.load(sys.stdin)['project']; print((d.get('schemes') or d.get('targets'))[0])")
+          echo "Scheme: $SCHEME"
+          echo "SCHEME=$SCHEME" >> $GITHUB_ENV
 
-      - name: Makefile'i bul ve KSign icin ayarla
+      - name: Xcode ile derle
         run: |
-          MF=$(find src -name Makefile -not -path '*/.theos/*' -not -path '*/packages/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
-          if [ -z "$MF" ]; then
-            echo "HATA: Zip icinde Theos Makefile bulunamadi."
+          set -o pipefail
+          xcodebuild build \
+            -project "$XCODEPROJ" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            IPHONEOS_DEPLOYMENT_TARGET=14.0 \
+            | tail -n 200
+          echo "---- Uretilen dosyalar ----"
+          find build/Build/Products -maxdepth 3 | head -50
+
+      - name: .deb olustur
+        run: |
+          mkdir -p out pkg/DEBIAN pkg/Library/MobileSubstrate/DynamicLibraries
+          DYLIB=$(find build/Build/Products -name '*.dylib' | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "HATA: dylib uretilmedi. Hedef dylib degil, app olabilir. Yukaridaki dosya listesine bak."
             exit 1
           fi
-          DIR=$(dirname "$MF")
-          echo "Proje klasoru: $DIR"
-          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
-          cd "$DIR"
-          # rootful + arm64 (KSign enjeksiyonu icin)
-          sed -i '' -E '/^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+?]?=/d' Makefile
-          sed -i '' -E '/^[[:space:]]*(export[[:space:]]+)?THEOS_PACKAGE_SCHEME[[:space:]]*[:+?]?=/d' Makefile
-          sed -i '' -E '/^[[:space:]]*(export[[:space:]]+)?TARGET[[:space:]]*[:+?]?=/d' Makefile
-          { printf 'ARCHS = arm64\nTARGET = iphone:clang:latest:14.0\n'; cat Makefile; } > Makefile.new
-          mv Makefile.new Makefile
-          echo "---- Makefile ----"
-          cat Makefile
-
-      - name: Derle ve .deb olustur
-        run: |
-          export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix dpkg)/bin:$PATH"
-          cd "$PROJECT_DIR"
-          make clean || true
-          make package FINALPACKAGE=1 ARCHS=arm64
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          cp packages/*.deb "$GITHUB_WORKSPACE/out/"
-          find .theos -name '*.dylib' -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
-          ls -la "$GITHUB_WORKSPACE/out"
+          echo "Dylib: $DYLIB"
+          NAME=$(basename "$DYLIB")
+          cp "$DYLIB" "pkg/Library/MobileSubstrate/DynamicLibraries/$NAME"
+          ldid -S "pkg/Library/MobileSubstrate/DynamicLibraries/$NAME" || true
+          # JRMemory.framework varsa yanina ekle
+          FW=$(find src -name 'JRMemory.framework' -maxdepth 4 | head -1)
+          if [ -n "$FW" ]; then
+            mkdir -p pkg/Library/Frameworks
+            cp -R "$FW" pkg/Library/Frameworks/
+          fi
+          cat > pkg/DEBIAN/control << CTRL
+          Package: com.dolphin.tweak
+          Name: Dolphin
+          Version: 1.0.0
+          Architecture: iphoneos-arm
+          Description: Dolphin dylib
+          Maintainer: Dolphin
+          Author: Dolphin
+          Section: Tweaks
+          CTRL
+          sed -i '' 's/^[[:space:]]*//' pkg/DEBIAN/control
+          dpkg-deb -Zgzip --root-owner-group -b pkg "out/Dolphin_1.0.0_iphoneos-arm.deb"
+          cp "$DYLIB" out/
+          ls -la out
 
       - name: Artifact olarak yukle
         uses: actions/upload-artifact@v4
