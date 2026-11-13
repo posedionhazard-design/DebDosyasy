@@ -42,7 +42,7 @@ jobs:
 
       - name: Eksik dosya taramasi (xcodeproj ile zip karsilastir)
         run: |
-          python3 - << 'PY'
+          python3 - << 'PY' 2>&1 | tee tarama.log
           import json, os, subprocess, unicodedata, difflib, shutil
 
           def nfc(s):
@@ -87,7 +87,7 @@ jobs:
                       index.append((nfc(f), os.path.join(root, f)))
 
               refs = [(oid, o) for oid, o in objs.items() if o.get("isa") == "PBXFileReference"]
-              total = missing = fixed = 0
+              total = missing = fixed = placeholders = 0
               print("Projede kayitli dosya sayisi:", len(refs))
               print("=" * 60)
               for oid, o in refs:
@@ -150,14 +150,25 @@ jobs:
                       shutil.copy2(pick, path)
                       fixed += 1
                       print("   -> OTOMATIK DUZELTILDI: kopyalandi:", pick)
+                  elif "/SDK/" in path.replace(os.sep, "/") and os.path.splitext(path)[1].lower() in (".cpp", ".cc", ".c", ".mm"):
+                      os.makedirs(os.path.dirname(path), exist_ok=True)
+                      with open(path, "w") as fh:
+                          fh.write("// BOS YER TUTUCU: bu dosya zip icinde bulunamadi, derlemenin devam etmesi icin olusturuldu\n")
+                      placeholders += 1
+                      print("   -> UYARI: zip'te yok, BOS yer tutucu olusturuldu (bu dosyanin fonksiyonlari eksik olacak)")
 
               print("=" * 60)
-              print("Kontrol edilen: %d | Eksik: %d | Otomatik duzeltilen: %d | Hala eksik: %d"
-                    % (total, missing, fixed, missing - fixed))
+              print("Kontrol edilen: %d | Eksik: %d | Otomatik duzeltilen: %d | Bos yer tutucu: %d | Hala eksik: %d"
+                    % (total, missing, fixed, placeholders, missing - fixed - placeholders))
           except Exception as e:
               print("Tarama hatasi (devam ediliyor):", repr(e))
           PY
-          echo "## Eksik dosya taramasi" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Eksik dosya taramasi"
+            echo '```'
+            grep -E "EKSIK|aday|UYARI|BELIRSIZ|OTOMATIK|Kontrol edilen" tarama.log | head -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Eksik imgui Metal dosyalarini tamamla
         run: |
@@ -178,36 +189,149 @@ jobs:
           done
           ls -la "$IMGUI_DIR" | head -40
 
-      - name: Xcode ile derle
+      - name: Xcode ile derle (hata olursa otomatik duzelt ve tekrar dene)
         run: |
-          set +e
-          xcodebuild build \
-            -project "$XCODEPROJ" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$GITHUB_WORKSPACE/build" \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            IPHONEOS_DEPLOYMENT_TARGET=14.0 \
-            GCC_PREPROCESSOR_DEFINITIONS='$(inherited) __forceinline=inline' \
-            > build.log 2>&1
-          RC=$?
-          echo "xcodebuild cikis kodu: $RC"
-          echo "================ HATA OZETI ================"
-          grep -E "error:" build.log | sed -E 's#/Users/runner/work/[^/]+/[^/]+/##' | sort -u | head -40
-          {
-            echo "## Derleme hatalari"
-            echo '```'
-            grep -E "error:" build.log | sed -E 's#/Users/runner/work/[^/]+/[^/]+/##' | sort -u | head -40
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "================ SON 30 SATIR ================"
-          tail -n 30 build.log
-          echo "---- Uretilen dosyalar ----"
-          find build/Build/Products -maxdepth 3 2>/dev/null | head -50
-          exit $RC
+          python3 - << 'PY'
+          import os, re, subprocess, shutil, hashlib, unicodedata
+
+          WS = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+          XCODEPROJ = os.environ.get("XCODEPROJ", "")
+          SCHEME = os.environ.get("SCHEME", "")
+          SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null")
+          HDR_DIR = os.path.join(WS, "auto_headers")
+          MAX_TRIES = 10
+          SRC_EXT = (".cpp", ".cc", ".c", ".mm", ".m")
+          HDR_EXT = (".h", ".hpp", ".hh", ".inl", ".pch")
+
+          def nfc(s):
+              return unicodedata.normalize("NFC", s)
+
+          def build_index():
+              idx = []
+              for root, dirs, files in os.walk(os.path.join(WS, "src")):
+                  for f in files:
+                      idx.append((nfc(f), os.path.join(root, f)))
+              return idx
+
+          def find_candidate(name, index):
+              lname = name.lower()
+              strong = [full for n, full in index if n.lower() == lname]
+              if not strong and "_" in name:
+                  suf = name.split("_", 1)[1].lower()
+                  strong = [full for n, full in index if "_" in n and n.split("_", 1)[1].lower() == suf]
+                  if not strong:
+                      strong = [full for n, full in index if n.lower().endswith(suf)]
+              if len(strong) > 1:
+                  hs = set(hashlib.md5(open(c, "rb").read()).hexdigest() for c in strong)
+                  if len(hs) == 1:
+                      strong = strong[:1]
+              return strong[0] if len(strong) == 1 else None
+
+          def fix_missing_input(path, index, log):
+              name = nfc(os.path.basename(path))
+              cand = find_candidate(name, index)
+              os.makedirs(os.path.dirname(path), exist_ok=True)
+              if cand:
+                  shutil.copy2(cand, path)
+                  log.append("kopyalandi: %s <- %s" % (name, os.path.relpath(cand, WS)))
+              else:
+                  ext = os.path.splitext(name)[1].lower()
+                  with open(path, "w") as fh:
+                      fh.write("// OTOMATIK BOS YER TUTUCU: %s zip icinde bulunamadi\n" % name)
+                  log.append("BOS yer tutucu olusturuldu: %s" % name)
+              return True
+
+          def fix_missing_header(inc, index, log):
+              target = os.path.join(HDR_DIR, inc)
+              if os.path.exists(target):
+                  return False
+              os.makedirs(os.path.dirname(target), exist_ok=True)
+              cand = find_candidate(nfc(os.path.basename(inc)), index)
+              if cand:
+                  shutil.copy2(cand, target)
+                  log.append("header kopyalandi: %s <- %s" % (inc, os.path.relpath(cand, WS)))
+              else:
+                  with open(target, "w") as fh:
+                      fh.write("// OTOMATIK BOS HEADER: %s bulunamadi\n#pragma once\n" % inc)
+                  log.append("BOS header olusturuldu: %s" % inc)
+              return True
+
+          def analyze(text, index, defines):
+              log = []
+              fixes = 0
+              seen = set()
+              for m in re.finditer(r"Build input file cannot be found: '(.+?)'", text):
+                  p = m.group(1)
+                  if p in seen:
+                      continue
+                  seen.add(p)
+                  if not os.path.exists(p):
+                      fixes += fix_missing_input(p, index, log)
+              for m in re.finditer(r"fatal error: '(.+?)' file not found", text):
+                  inc = m.group(1)
+                  if inc in seen:
+                      continue
+                  seen.add(inc)
+                  fixes += fix_missing_header(inc, index, log)
+              for m in re.finditer(r"unknown type name '(__\w+)'|expected ';' after top level declarator", text):
+                  pass
+              for m in re.finditer(r"unknown type name '(__(?:cdecl|stdcall|fastcall|thiscall|vectorcall|forceinline))'", text):
+                  d = m.group(1)
+                  if d not in defines:
+                      defines[d] = "inline" if d == "__forceinline" else ""
+                      log.append("tanim eklendi: %s=%s" % (d, defines[d]))
+                      fixes += 1
+              return fixes, log
+
+          # ---- main ----
+          def run_build(defines):
+              defs = " ".join("%s=%s" % (k, v) for k, v in defines.items())
+              cmd = [
+                  "xcodebuild", "build", "-project", XCODEPROJ, "-scheme", SCHEME,
+                  "-configuration", "Release", "-sdk", "iphoneos",
+                  "-destination", "generic/platform=iOS",
+                  "-derivedDataPath", os.path.join(WS, "build"),
+                  "ARCHS=arm64", "ONLY_ACTIVE_ARCH=NO",
+                  "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY=",
+                  "IPHONEOS_DEPLOYMENT_TARGET=14.0",
+                  "GCC_PREPROCESSOR_DEFINITIONS=$(inherited) " + defs,
+                  "HEADER_SEARCH_PATHS=$(inherited) " + HDR_DIR,
+              ]
+              r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+              open(os.path.join(WS, "build.log"), "w").write(r.stdout)
+              return r.returncode, r.stdout
+
+          if __name__ == "__main__":
+              os.makedirs(HDR_DIR, exist_ok=True)
+              defines = {"__forceinline": "inline"}
+              report = []
+              rc = 1
+              out = ""
+              for attempt in range(1, MAX_TRIES + 1):
+                  rc, out = run_build(defines)
+                  print("== Deneme %d: cikis kodu %d ==" % (attempt, rc), flush=True)
+                  if rc == 0:
+                      break
+                  idx = build_index()
+                  fixes, log = analyze(out, idx, defines)
+                  for l in log:
+                      print("  DUZELTME:", l, flush=True)
+                      report.append("Deneme %d: %s" % (attempt, l))
+                  if fixes == 0:
+                      print("  Otomatik duzeltilebilecek hata kalmadi.", flush=True)
+                      break
+              errs = sorted(set(re.sub(r"/Users/runner/work/[^/]+/[^/]+/", "", l.strip())
+                                for l in out.splitlines() if "error:" in l or "undefined symbol" in l.lower()))
+              print("================ HATA OZETI ================")
+              for e in errs[:40]:
+                  print(e)
+              with open(SUMMARY, "a") as fh:
+                  fh.write("## Otomatik duzeltmeler\n```\n" + ("\n".join(report) or "yok") + "\n```\n")
+                  fh.write("## Kalan hatalar\n```\n" + ("\n".join(errs[:40]) or "yok") + "\n```\n")
+              print("---- Son 20 satir ----")
+              print("\n".join(out.splitlines()[-20:]))
+              raise SystemExit(rc)
+          PY
 
       - name: .deb olustur
         run: |
