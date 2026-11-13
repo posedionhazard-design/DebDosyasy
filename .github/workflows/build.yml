@@ -1,0 +1,70 @@
+name: Build DEB
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Zip'i ac
+        run: |
+          mkdir -p src
+          unzip -q -o Dolphin.zip -d src
+          rm -rf src/__MACOSX
+          find src -maxdepth 3 -not -path '*/.git/*' | head -60
+
+      - name: Bagimliliklari kur
+        run: |
+          brew install ldid dpkg make xz fakeroot || true
+
+      - name: Theos kur
+        run: |
+          git clone --recursive --depth=1 https://github.com/theos/theos.git $HOME/theos
+          rm -rf $HOME/theos/sdks
+          git clone --depth=1 https://github.com/theos/sdks.git $HOME/theos/sdks
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          ls $HOME/theos/sdks
+
+      - name: Makefile'i bul ve KSign icin ayarla
+        run: |
+          MF=$(find src -name Makefile -not -path '*/.theos/*' -not -path '*/packages/*' | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          if [ -z "$MF" ]; then
+            echo "HATA: Zip icinde Theos Makefile bulunamadi."
+            exit 1
+          fi
+          DIR=$(dirname "$MF")
+          echo "Proje klasoru: $DIR"
+          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
+          cd "$DIR"
+          # rootful + arm64 (KSign enjeksiyonu icin)
+          sed -i '' -E '/^[[:space:]]*(export[[:space:]]+)?ARCHS[[:space:]]*[:+?]?=/d' Makefile
+          sed -i '' -E '/^[[:space:]]*(export[[:space:]]+)?THEOS_PACKAGE_SCHEME[[:space:]]*[:+?]?=/d' Makefile
+          sed -i '' -E '/^[[:space:]]*(export[[:space:]]+)?TARGET[[:space:]]*[:+?]?=/d' Makefile
+          { printf 'ARCHS = arm64\nTARGET = iphone:clang:latest:14.0\n'; cat Makefile; } > Makefile.new
+          mv Makefile.new Makefile
+          echo "---- Makefile ----"
+          cat Makefile
+
+      - name: Derle ve .deb olustur
+        run: |
+          export PATH="$(brew --prefix make)/libexec/gnubin:$(brew --prefix dpkg)/bin:$PATH"
+          cd "$PROJECT_DIR"
+          make clean || true
+          make package FINALPACKAGE=1 ARCHS=arm64
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp packages/*.deb "$GITHUB_WORKSPACE/out/"
+          find .theos -name '*.dylib' -exec cp {} "$GITHUB_WORKSPACE/out/" \; || true
+          ls -la "$GITHUB_WORKSPACE/out"
+
+      - name: Artifact olarak yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: out/*
+          if-no-files-found: error
