@@ -34,6 +34,25 @@ jobs:
           echo "Scheme: $SCHEME"
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
 
+      - name: Eksik imgui Metal dosyalarini tamamla
+        run: |
+          IMGUI_H=$(find src -name imgui.h | head -1)
+          if [ -z "$IMGUI_H" ]; then echo "imgui.h bulunamadi, atlaniyor"; exit 0; fi
+          IMGUI_DIR=$(dirname "$IMGUI_H")
+          VER=$(grep -m1 '#define IMGUI_VERSION ' "$IMGUI_H" | sed -E 's/.*"([^"]+)".*/\1/')
+          VER=${VER%% *}
+          echo "imgui klasoru: $IMGUI_DIR"
+          echo "imgui surumu: $VER"
+          for F in imgui_impl_metal.mm imgui_impl_metal.h; do
+            if [ ! -f "$IMGUI_DIR/$F" ]; then
+              echo "$F eksik, indiriliyor (v$VER)"
+              curl -fsSL "https://raw.githubusercontent.com/ocornut/imgui/v$VER/backends/$F" -o "$IMGUI_DIR/$F" \
+              || curl -fsSL "https://raw.githubusercontent.com/ocornut/imgui/v$VER/examples/$F" -o "$IMGUI_DIR/$F" \
+              || curl -fsSL "https://raw.githubusercontent.com/ocornut/imgui/master/backends/$F" -o "$IMGUI_DIR/$F"
+            fi
+          done
+          ls -la "$IMGUI_DIR" | head -40
+
       - name: Xcode ile derle
         run: |
           set -o pipefail
