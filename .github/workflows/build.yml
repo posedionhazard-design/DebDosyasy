@@ -15,9 +15,30 @@ jobs:
       - name: Zip'i ac
         run: |
           mkdir -p src
-          unzip -q -o Dolphin.zip -d src
+          ditto -x -k Dolphin.zip src || unzip -q -o Dolphin.zip -d src
           rm -rf src/__MACOSX
           find src -maxdepth 3 -not -path '*/.git/*' | head -60
+          echo "---- SANSERO dosyalari ----"
+          find src -iname '*SANSERO*' | head -50
+          echo "SDK dosya sayisi:"
+          find src -type f -path '*SDK*' | wc -l
+
+      - name: SANSERO / 视图 isim eslemesi
+        run: |
+          python3 - << 'PY'
+          import os, shutil
+          n = 0
+          for root, dirs, files in os.walk("src"):
+              for f in files:
+                  if "视图" in f:
+                      new = f.replace("视图", "SANSERO")
+                      dst = os.path.join(root, new)
+                      if not os.path.exists(dst):
+                          shutil.copy2(os.path.join(root, f), dst)
+                          n += 1
+                          print("kopyalandi:", f, "->", new)
+          print("Toplam kopya:", n)
+          PY
 
       - name: Araclari kur
         run: |
