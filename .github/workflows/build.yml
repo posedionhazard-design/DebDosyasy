@@ -18,27 +18,12 @@ jobs:
           ditto -x -k Dolphin.zip src || unzip -q -o Dolphin.zip -d src
           rm -rf src/__MACOSX
           find src -maxdepth 3 -not -path '*/.git/*' | head -60
-          echo "---- SANSERO dosyalari ----"
-          find src -iname '*SANSERO*' | head -50
+          echo "---- iTOP / slua / unreal iceren dosyalar ----"
+          find src \( -iname '*itop*' -o -iname '*slua*' -o -iname '*unreal*' \) | head -80
+          echo "---- SDK klasorundeki .cpp dosyalari (ilk 80) ----"
+          find src -path '*SDK*' -name '*.cpp' | head -80
           echo "SDK dosya sayisi:"
           find src -type f -path '*SDK*' | wc -l
-
-      - name: SANSERO / 视图 isim eslemesi
-        run: |
-          python3 - << 'PY'
-          import os, shutil
-          n = 0
-          for root, dirs, files in os.walk("src"):
-              for f in files:
-                  if "视图" in f:
-                      new = f.replace("视图", "SANSERO")
-                      dst = os.path.join(root, new)
-                      if not os.path.exists(dst):
-                          shutil.copy2(os.path.join(root, f), dst)
-                          n += 1
-                          print("kopyalandi:", f, "->", new)
-          print("Toplam kopya:", n)
-          PY
 
       - name: Araclari kur
         run: |
@@ -54,6 +39,112 @@ jobs:
           SCHEME=$(xcodebuild -list -json -project "$XP" | python3 -c "import sys,json; d=json.load(sys.stdin)['project']; print((d.get('schemes') or d.get('targets'))[0])")
           echo "Scheme: $SCHEME"
           echo "SCHEME=$SCHEME" >> $GITHUB_ENV
+
+      - name: Eksik dosya taramasi (xcodeproj ile zip karsilastir)
+        run: |
+          python3 - << 'PY'
+          import json, os, subprocess, unicodedata, difflib, shutil
+
+          def nfc(s):
+              return unicodedata.normalize("NFC", s)
+
+          try:
+              xp = os.environ["XCODEPROJ"]
+              proj_dir = os.path.dirname(os.path.abspath(xp))
+              pb = os.path.join(xp, "project.pbxproj")
+              data = json.loads(subprocess.check_output(["plutil", "-convert", "json", "-o", "-", pb]))
+              objs = data["objects"]
+
+              parent = {}
+              for oid, o in objs.items():
+                  if o.get("isa") in ("PBXGroup", "PBXVariantGroup", "PBXReferenceProxy"):
+                      for c in o.get("children", []):
+                          parent[c] = oid
+
+              def resolve(oid):
+                  parts = []
+                  cur = oid
+                  while cur:
+                      o = objs[cur]
+                      p = o.get("path")
+                      st = o.get("sourceTree", "<group>")
+                      if p:
+                          parts.insert(0, p)
+                      if st == "<absolute>":
+                          return os.path.join(*parts) if parts else None
+                      if st == "SOURCE_ROOT":
+                          return os.path.join(proj_dir, *parts)
+                      if st == "<group>":
+                          cur = parent.get(cur)
+                          continue
+                      return None
+                  return os.path.join(proj_dir, *parts) if parts else None
+
+              # src icindeki tum dosyalar
+              index = []
+              for root, dirs, files in os.walk("src"):
+                  for f in files:
+                      index.append((nfc(f), os.path.join(root, f)))
+
+              refs = [(oid, o) for oid, o in objs.items() if o.get("isa") == "PBXFileReference"]
+              total = missing = fixed = 0
+              print("Projede kayitli dosya sayisi:", len(refs))
+              print("=" * 60)
+              for oid, o in refs:
+                  path = resolve(oid)
+                  if not path:
+                      continue
+                  total += 1
+                  if os.path.exists(path):
+                      continue
+                  missing += 1
+                  name = nfc(os.path.basename(path))
+                  print("EKSIK:", path)
+
+                  strong = []
+                  lname = name.lower()
+                  for n, full in index:
+                      if n.lower() == lname:
+                          strong.append(full)
+                  if "_" in name:
+                      suf = name.split("_", 1)[1].lower()
+                      for n, full in index:
+                          if n.lower().endswith(suf) and full not in strong:
+                              strong.append(full)
+
+                  fuzzy = []
+                  ext = os.path.splitext(name)[1].lower()
+                  pool = [n for n, _ in index if os.path.splitext(n)[1].lower() == ext]
+                  for m in difflib.get_close_matches(name, pool, n=3, cutoff=0.6):
+                      for n, full in index:
+                          if n == m and full not in strong and full not in fuzzy:
+                              fuzzy.append(full)
+
+                  cands = strong + fuzzy
+                  for c in cands[:5]:
+                      print("   aday:", c)
+                  if not cands:
+                      print("   aday yok: dosya zip icinde bulunamadi")
+
+                  pick = None
+                  if len(strong) == 1:
+                      pick = strong[0]
+                  elif not strong and len(fuzzy) == 1:
+                      r = difflib.SequenceMatcher(None, name, nfc(os.path.basename(fuzzy[0]))).ratio()
+                      if r >= 0.85:
+                          pick = fuzzy[0]
+                  if pick:
+                      os.makedirs(os.path.dirname(path), exist_ok=True)
+                      shutil.copy2(pick, path)
+                      fixed += 1
+                      print("   -> OTOMATIK DUZELTILDI: kopyalandi:", pick)
+
+              print("=" * 60)
+              print("Kontrol edilen: %d | Eksik: %d | Otomatik duzeltilen: %d | Hala eksik: %d"
+                    % (total, missing, fixed, missing - fixed))
+          except Exception as e:
+              print("Tarama hatasi (devam ediliyor):", repr(e))
+          PY
 
       - name: Eksik imgui Metal dosyalarini tamamla
         run: |
